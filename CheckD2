@@ -1,0 +1,438 @@
+#!/usr/bin/ksh
+
+# Script to check Driver II infrastructure
+# Done by GSC
+# To be added:
+# Reverse dns records 
+# New esx config dns entries
+# Verbose option
+
+function Message
+   {
+    echo "$1"
+   }
+   
+function Error
+   {
+    echo "$1"
+    exit 1
+   }
+   
+function CheckReturn
+   {
+    if (( $1 != 0 ))
+       then
+          Message "$2"
+       else
+          echo $3
+    fi
+   }
+
+function CheckCommon
+   {
+    echo "Checking Central Services"
+    curl -I --fail http://rpnbb.dieteren.be:81/ > /dev/null 2>&1
+    CheckReturn $? "Importer Backbone is not responding" "RPNBB OK"
+
+    curl -I --fail http://cpnbb.dieteren.be:81/ > /dev/null 2>&1
+    CheckReturn $? "Central Backbone is not responding" "CPNBB OK"
+   }
+
+function CheckAllLpnbb
+   {
+    MACH=$(hostname | cut -d'.' -f1)
+    if [[ "$MACH" == "sv1" ]]
+       then
+          echo "Option not allowed in the field"
+	  exit 1
+    fi
+    for i in $( cat AllCon )
+       do 
+          ping -c 1 lpnbb.$i.dieteren.be > /dev/null 2>&1
+          if (( $? == 0 ))
+             then 
+ 	        curl --fail -I http://lpnbb.$i.dieteren.be:81 > /dev/null 2>&1
+ 	           CheckReturn $? "lpnbb.$i.dieteren.be is defined but not responding" "LPNBB OK"
+             else 
+	        Message "lpnbb.$i.dieteren.be is not in DNS or does not respond" 
+          fi 
+       done 
+   }
+
+function CheckBtac
+   {
+    echo "Checking Btac (DMSBB) instance"
+    # Next Part is to check all BTAC-urls that are defined in a file =< ALL elmsa, etka are also tested
+    # BTACURL=btac.urls
+    # for i in $( cat $BTACURL )
+    #    do
+    #       ServiceName=$( echo $i | cut -d'#' -f1)
+    #       Url=$(echo $i | cut -d'#' -f2- )
+    #       curl -I "$Url" > /dev/null 2>&1
+    #       CheckReturn $? "$ServiceName is not responding"
+    #    done
+    # Alternative, let the backbone check all services
+    cd /usr/Dbin
+    curl --fail -c coockie.btac http://lpnbb:81/dmsbackbone/admin > /dev/null 2>&1
+    curl --fail -b coockie.btac -o btacservices.html -s -d "$(echo  'submit=  Test All Services' | ./urlencode )" "http://lpnbb:81/dmsbackbone/admin/template/TestAllServices.vm/action/TestAllServices?eventsubmit_dotestallservices=true"
+    #htmlview btacservices.html
+    elinks -dump btacservices.html | grep "|" | cut -d'|' -f2-5 | grep -v '-' | tr -d '|'
+    echo "Active grants : "
+    RES=$(curl --fail -s http://lpnbb:81/dmsbackbone/admin/template/Routing.vm | grep "dealer:" | cut -d'<' -f2  | cut -d'>' -f2)
+    if [[ "$RES" == "" ]]
+       then
+          echo "No grants found, please check"
+       else
+          echo $RES
+    fi
+    cd - > /dev/null 2>&1
+   }
+
+function CheckSonic
+   {
+    echo "Checking Sonic"
+    # Just check that domain is available
+    nc -z mail-sonic-01.dieteren.be 3500 > /dev/null 2>&1
+    CheckReturn $? "...Domain manager is not running or can not be found" "...Central Sonic (mail-sonic-01) OK"
+    nc -z ek-sonic-01.dieteren.be 3500 > /dev/null 2>&1
+    CheckReturn $? "...Domain manager is not running or can not be found" "...Central Sonic (ek-sonic-01) OK"
+    nc -z sv1vm10 3510 > /dev/null 2>&1
+    CheckReturn $? "...Local Broker manager is not running" "...Local Sonic 3510 OK"
+    nc -z sv1vm10 8000 > /dev/null 2>&1
+    CheckReturn $? "...Local Acceptor is not running" "...Local Sonic 8000 OK"
+   }
+
+function CheckVenice
+   {
+    echo "Checking Venice"
+    # Check that we can read wsdl file from Venice 
+    curl --fail http://sv1vm12/Dieteren/Clws/CustmService.asmx?wsdl > /dev/null 2>&1
+    CheckReturn $?  "...Venice is not responding to webrequests" "...Venice IIS OK"
+    cat >> /tmp/AliveVenice << EOF
+<?xml version="1.0" encoding="UTF-8" ?><soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing"> <soapenv:Header> <wsa:MessageID soapenv:mustUnderstand="0">uuid:d1dd7960-349f-11dd-8848-ebfd0c647cde</wsa:MessageID> <wsa:To soapenv:mustUnderstand="0">http://sv1vm12/Dieteren/ClWs/GlobalService.asmx</wsa:To> <wsa:Action soapenv:mustUnderstand="0">http://www.c-logic.be/WebServices/Venice/Global/IsAlive</wsa:Action> <wsa:From xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing" soapenv:mustUnderstand="0"> <wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address> </wsa:From> <wsa:ReplyTo xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing" soapenv:mustUnderstand="0"> <wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address> </wsa:ReplyTo> <wsa:FaultTo xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing" soapenv:mustUnderstand="0"> <wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address> </wsa:FaultTo> </soapenv:Header> <soapenv:Body> <ns1:IsAlive xmlns="http://www.c-logic.be/WebServices/Venice/Global" xmlns:ns1="http://www.c-logic.be/WebServices/Venice/Global" /> </soapenv:Body> </soapenv:Envelope>
+EOF
+    curl -s -d@/tmp/AliveVenice -H "Content-type:text/xml" -H 'SOAPAction: "http://www.c-logic.be/WebServices/Venice/Global/IsAlive"' http://sv1vm12/Dieteren/ClWs/GlobalService.asmx > /dev/null 2>&1
+    CheckReturn $?  "...Venice is not responding to IsAlive Requests" "...Venice IsAlive OK"
+   }
+
+function RunAll
+   {
+    CheckDns
+    CheckBtac
+    CheckSonic
+    CheckVenice
+    CheckAdmin
+    CheckElsaPro
+    CheckApp
+    CheckKp
+    CheckRh
+   }
+
+function PrintHelp
+   {
+    cat << EOF
+This program can be used to check the DRIVER2 environment of a dealer.
+CheckD2 <options> 
+The following options are supported :
+-a : Run All LOCAL Tests
+-b : Check Btac Services
+-c : Check Common services
+-d : Check DNS services
+-e : Check ElsaPro 
+-k : Check KP services
+-n <DOMAINNAME> : Check DNS services for another domain
+-m <DOMAINNAME REMOTE site> <DOMAINNAME MAIN site> : Check DNS services for remote site 
+-x : Check specific maildomain or X-check domains for site
+-p : Check Admin Server availability
+-q : Check App Server availability
+-r : Check Rh availability
+-s : Check Sonic domain
+-v : Check Venice Web Services
+-l : Check availability of ALL lpnbb
+-h : Print this help
+EOF
+   }
+   
+function CheckKp
+   {
+    echo "Checking kp4driver URL"
+    curl -s http://kp4driver2.app.dieteren.be/service.asmx?op=CallKPSEARPS > /tmp/KP.log 2>&1
+    if (( $? != 0 ))
+       then
+          echo "... KP not functioning"
+       else
+          echo "... KP is operational"
+    fi
+    rm /tmp/KP.log
+   }
+   
+function CheckRh
+   {
+    echo "Checking RH URL"
+    #curl -s "http://www.bic-online.dieteren.be/DL_nl.aspx?lg=nl&txtNAME=buslot&txtNUMBER=&Number=10" > /tmp/RH.log 2>&1
+    curl -s "http://bic2otherapps.wsc.dieteren.be/BIC2Driver2.asmx?wsdl" > /tmp/RH.log 2>&1
+    if (( $? != 0 ))
+       then
+          echo "... RH not functioning"
+       else
+          echo "... RH is operational"
+    fi
+    rm /tmp/RH.log
+   }
+   
+function CheckIP
+   {
+    if (( $# != 3 ))
+       then
+          echo "Not enough arguments to CheckIP $*"
+          return 1
+    fi
+    if [[ "$1" != "$2" ]]
+       then
+          echo -n "$3 is not correct : $1 in stead of $2"
+       else
+          echo -n "$3 OK"
+    fi
+    # Check reverse record
+    RES=$(dig +short -x $1 | tr '[A-Z]' '[a-z]')
+    ORI=$(echo $3 | tr '[A-Z]' '[a-z]')
+    if [[ "$RES" != "$ORI." ]]
+       then
+          echo "...reverse NOK $RES in stead of $ORI."
+    else
+       echo "...reverse is OK"
+    fi
+   }
+
+function CheckDns
+   {
+    if (( $# == 0 ))
+       then
+          DOM=$CONCESS.dieteren.be
+	  SERVER=""
+	  MXPRE=$CONCESS
+       else
+          DOM=$1
+	  SERVER="@10.192.0.15"
+	  MXPRE=$(echo $1 | cut -d'.' -f1)
+    fi
+    echo "Crosschecking minimal DNS config for $DOM at $SERVER"
+    NET=$(dig $SERVER +short sv1.$DOM | cut -d'.' -f1-3)
+    LEN=$( echo $NET | wc -c | tr -d ' ' )
+    if (( $LEN < 7 ))
+       then
+           echo "Error : no sv1 exists, can not determine \$NET value"
+	   exit 1
+    fi
+    for i in gw sv1 db1 sv1vm10 sv1vm11 sv1vm12 sv1vm51 lpnbb printer mirrorserver prt1 sw1 vas1 pc1 sonic
+       do
+          RES=$(dig $SERVER +short $i.$DOM | grep $NET)
+	  if [[ "$RES" == "" ]]
+	     then
+	        echo "No definition in dns for $i.$DOM"
+             else
+	        case "$i" in
+	           gw) CheckIP $RES $NET.1 $i.$DOM ;;
+	           sv1) CheckIP $RES $NET.2 $i.$DOM ;;
+	           db1) CheckIP $RES $NET.2 $i.$DOM ;;
+	           sv1vm10) CheckIP $RES $NET.3 $i.$DOM ;;
+	           sv1vm11) CheckIP $RES $NET.4 $i.$DOM ;;
+	           sv1vm12) CheckIP $RES $NET.5 $i.$DOM ;;
+	           sv1vm51) CheckIP $RES $NET.150 $i.$DOM ;;
+	           lpnbb) CheckIP $RES $NET.4 $i.$DOM ;;
+	           printer) IPPRT=$(dig +short printer.$DOM) ; CheckIP $RES $IPPRT $i ;;
+	           mirrorserver) CheckIP $RES $NET.250 $i.$DOM ;;
+	           prt1) CheckIP $RES $NET.180 $i.$DOM ;;
+	           sw1) CheckIP $RES $NET.240 $i.$DOM ;;
+	           vas1) CheckIP $RES $NET.200 $i.$DOM ;;
+	           pc1) CheckIP $RES $NET.10 $i.$DOM ;;
+	           sonic) CheckIP $RES $NET.3 $i.$DOM ;;
+                esac
+	  fi
+      done
+      # Extra checks on existing mx records
+      for i in vw audi cvi.vw skoda seat myway
+         do
+	    MXRES=$(dig @10.192.0.15 -t mx +short $MXPRE.$i.be )
+	    if [[ "$MXRES" != "" ]]
+	       then
+	          echo $MXRES | grep sv1 > /dev/null 2>&1
+		  if (( $? != 0 ))
+		     then
+	                echo "MX record for $MXPRE.$i.be points to $MXRES"
+                  fi
+            fi
+	 done
+   }
+   
+function CheckApp
+   {
+    echo "Checking Application Server Progress"
+    asbman -query -name assv1
+    if (( $? != 0 ))
+       then
+          echo "... App Server NOT running"
+       else
+          echo "... App Server OK"
+    fi
+   }
+
+function CheckElsaPro
+   {
+    echo "Checking ElsaPro / CPNBB"
+    IP=$(curl -s http://cpnbb/admin/ip.asp | grep "10." | cut -d':' -f2 | cut -d'>' -f2 | cut -d'<' -f1)
+    echo "... IP used to get into Germany is : $IP"
+   }
+
+function CheckAdmin
+   {
+    echo "Checking Progress Name Server Progress"
+    nc -u -z localhost 5162 > /dev/null 2>&1
+    if (( $? != 0 ))
+       then
+          echo "... Progress Name Server NOT running"
+       else
+          echo "... Progress Name Server OK"
+    fi 
+    echo "Checking Admin Server Progress"
+    nc -z localhost 20931 > /dev/null 2>&1
+    if (( $? != 0 ))
+       then
+          echo "... Admin Server NOT running"
+       else
+          echo "... Admin Server OK"
+    fi 
+   }
+
+function CheckMulti
+   {
+    if (( $# != 3 ))
+       then
+	  echo "Please specify REMOTESITE MAINSITE suffix"
+	  exit 1
+       else
+          shift 
+          DOM=$1
+          DOMMST=$2
+	  SERVER="@10.192.0.15"
+	  MXPRE=$(echo $2 | cut -d'.' -f1)
+    fi
+    echo "Crosschecking minimal DNS config for $DOM and $DOMMST at $SERVER"
+    NET=$(dig $SERVER +short sv1.$DOM | cut -d'.' -f1-3)
+    NET1=$(echo $NET | cut -d'.' -f1-2)
+    NETMST=$(dig $SERVER +short sv1.$DOMMST | cut -d'.' -f1-3)
+    for i in gw sv1 db1 lpnbb mirrorserver printer prt1 sw1 vas1 pc1 sonic
+       do
+          RES=$(dig $SERVER +short $i.$DOM | grep $NET1 )
+	  if [[ "$RES" == "" ]]
+	     then
+	        echo "No definition in dns for $i.$DOM"
+             else
+	        case "$i" in
+	           gw) CheckIP $RES $NET.1 $i.$DOM ;;
+	           sv1) CheckIP $RES $NET.2 $i.$DOM ;;
+	           db1) CheckIP $RES $NETMST.2 $i.$DOM ;;
+	           lpnbb) CheckIP $RES $NETMST.4 $i.$DOM ;;
+	           sonic) CheckIP $RES $NETMST.3 $i.$DOM ;;
+	           mirrorserver) CheckIP $RES $NET.250 $i.$DOM ;;
+	           printer) CheckIP $RES $NET.180 $i.$DOM ;;
+	           prt1) CheckIP $RES $NET.180 $i.$DOM ;;
+	           sw1) CheckIP $RES $NET.240 $i.$DOM ;;
+	           vas1) CheckIP $RES $NET.200 $i.$DOM ;;
+	           pc1) CheckIP $RES $NET.10 $i.$DOM ;;
+                esac
+	  fi
+      done
+      # Extra checks on existing mx records
+      for i in vw audi cvi.vw skoda seat
+         do
+	    MXRES=$(dig -t mx +short $MXPRE.$i.be | cut -d'.' -f1)
+	    if [[ "$MXRES" != "" ]]
+	       then
+	          echo $MXRES | grep sv1 > /dev/null 2>&1
+		  if (( $? != 0 ))
+		     then
+	                echo "MX record for $MXPRE.$i.be points to $MXRES"
+                  fi
+            fi
+	 done
+   }
+   
+function CheckMX
+   {
+    if (( $# < 1 ))
+       then
+          echo "No arguments specified!"
+          exit 1
+       fi
+    # Check of 1 of 3 parts
+    MXPRE=$(echo $2. | cut -d'.' -f1)
+    MXPRE2=$(echo $2. | cut -d'.' -f2)
+    if [[ "$MXPRE2" == "" ]]
+       then
+          echo "Checking anomalies for $MXPRE"
+    # Extra checks on existing mx records
+         for i in vw audi cvi.vw skoda seat
+            do
+               MXRES=$(dig -t mx +short $MXPRE.$i.be | cut -d'.' -f1-)
+               if [[ "$MXRES" != "" ]]
+                  then
+                     echo $MXRES | grep sv1 > /dev/null 2>&1
+                     if (( $? != 0 ))
+                        then
+                           echo "MX record for $MXPRE.$i.be points to $MXRES"
+                     fi
+               fi
+            done
+       else
+          MXRES=$(dig -t mx +short $2 | cut -d'.' -f1-)
+          if [[ "$MXRES" != "" ]]
+             then
+                echo "MX record for $2 points to $MXRES"
+             else
+                echo "No MX record for $2"
+          fi
+    fi
+   }
+
+# Main - Start of script
+
+unset http_proxy
+
+# Option parsing to determine which tests to run
+OPTIONFLAGS=abcdekn:mpqrslvxh
+
+if (( $# < 1 ))
+   then
+      PrintHelp
+      exit 0
+fi
+
+NC=$(echo $1 | tr -d "$OPTIONFLAGS" | wc -c | tr -d ' ')
+if (( $NC > 2 ))
+   then
+      Error "Unsupported parameters supplied, please specify only $OPTIONFLAGS"
+fi
+
+while getopts $OPTIONFLAGS i
+   do
+      case "$i" in
+         a) RunAll;;
+         b) CheckBtac;;
+         c) CheckCommon;;
+         d) CheckDns;;
+         e) CheckElsaPro;;
+         k) CheckKp;;
+         n) CheckDns $OPTARG;;
+	 m) CheckMulti $* ;;
+	 p) CheckAdmin ;;
+	 q) CheckApp ;;
+	 r) CheckRh ;;
+         s) CheckSonic;;
+         v) CheckVenice;;
+	 l) CheckAllLpnbb;;
+	 x) CheckMX $* ;;
+         h) PrintHelp;;
+         *) echo "Unimplemented function, please check!!!" ; break;;
+      esac
+   done
